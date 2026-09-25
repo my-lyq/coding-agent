@@ -1,0 +1,8 @@
+# Day 1 demo uses only Python's standard library.
+# Install these to run the optional Qwen backend and later LoRA training:
+torch>=2.1
+transformers>=4.45
+accelerate>=0.34
+peft>=0.13
+datasets>=3.0
+

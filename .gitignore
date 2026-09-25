@@ -1,0 +1,6 @@
+coding-agent/
+__pycache__/
+*.py[cod]
+outputs/
+.pytest_cache/
+

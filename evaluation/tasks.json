@@ -1,0 +1,5 @@
+[
+  {"id":"calculator_subtract","instruction":"Fix the subtract function in calculator.py. It should return a minus b.","editable_files":["calculator.py"],"test_command":["python","-m","unittest","discover","-s",".","-p","test_*.py"],"seen_in_sft":true},
+  {"id":"normalize_palindrome","instruction":"Fix is_palindrome in strings.py. Comparison must ignore case and non-alphanumeric characters.","editable_files":["strings.py"],"test_command":["python","-m","unittest","discover","-s",".","-p","test_*.py"],"seen_in_sft":false},
+  {"id":"stable_unique","instruction":"Fix stable_unique in collections_utils.py. Remove duplicates while preserving first-occurrence order.","editable_files":["collections_utils.py"],"test_command":["python","-m","unittest","discover","-s",".","-p","test_*.py"],"seen_in_sft":false}
+]
