@@ -145,3 +145,60 @@ records are skipped. Use `--retry-errors` to archive and retry errors,
 and `--dry-run` to inspect scheduling without loading the model. The fallback
 `python -m pytest -q` is only a smoke command; benchmark-quality runs should use
 a prepared command map and task-specific environments.
+
+
+## Version 2: Agent rollout and failure analysis
+
+Generate either one repository-level trajectory or the first N subset tasks:
+
+    python scripts/generate_rollouts.py --instance-id astropy__astropy-12907
+    python scripts/generate_rollouts.py --num-tasks 10
+
+The command resolves the subset task and prepared base-commit checkout, creates
+an isolated shared-clone workspace, runs a structured policy through list_files, search_code, read_file,
+apply_patch, and run_test, and atomically writes `task_xxxxx.json`
+under `/data_local/lyq/data_coding_agent/trajectories/raw/`. Use `--dry-run` to
+inspect resolution, `--test-command` for repository-specific tests,
+`--adapter-path` for PEFT weights, and `--overwrite` to replace an existing
+trajectory. By default the script derives existing test file paths from
+FAIL_TO_PASS without applying or exposing the gold test patch. This provides
+rollout feedback but is not a replacement for final SWE-bench harness
+evaluation, which must apply hidden tests in a separate evaluator environment.
+
+Analyze every `task_*.json` trajectory after rollout:
+
+    python scripts/analyze_rollouts.py
+
+The atomic report at
+`/data_local/lyq/data_coding_agent/logs/rollout_analysis.json` contains
+success rate, average steps and tool calls, invalid/failed tool counts, final
+test outcomes, per-task details, and one deterministic failure reason per failed
+task.
+
+
+## Version 2: structured Agent tools
+
+SWE-bench rollouts now require one JSON tool call per model turn:
+
+    {"tool":"read_file","arguments":{"path":"src/example.py"}}
+
+The canonical schemas live in `agent/tools/schema.py` and expose list_files,
+search_code, read_file, apply_patch, and run_test. Known aliases such as
+edit_file, update_file, modify_file, and update_code are repaired to
+apply_patch instead of terminating the rollout. Every saved step records
+original_action, repaired_action, invalid_action, and repair_applied. The Day 1
+calculator remains compatible with its legacy Thought/Action protocol.
+
+
+## Step 9: structured baseline analysis
+
+Compare ten structured-tool trajectories with the earlier free-action baseline:
+
+    python scripts/analyze_tool_usage.py
+
+The analyzer reads `trajectories/structured/` and `trajectories/raw/`, prints a
+Markdown comparison table, and atomically writes
+`/data_local/lyq/data_coding_agent/logs/structured_baseline_analysis.json`.
+It reports success and patch rates, canonical tool frequency, average trajectory
+length, invalid/repair metrics, protocol-valid and effective trajectory rates,
+and a mutually exclusive failure taxonomy.

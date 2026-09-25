@@ -277,6 +277,17 @@ def _save_task_trajectory(
                     f"{json.dumps(step.action_input, ensure_ascii=False, sort_keys=True)})"
                 ),
                 "observation": step.observation,
+                "original_action": step.original_action or step.action,
+                "repaired_action": step.repaired_action,
+                "invalid_action": step.invalid_action,
+                "repair_applied": step.repair_applied,
+                "phase": step.phase,
+                "previous_phase": step.previous_phase,
+                "model_proposed_tool": step.model_proposed_tool,
+                "executed_tool": step.executed_tool,
+                "controller_intervened": step.controller_intervened,
+                "intervention_reason": step.intervention_reason,
+                "tool_success": step.tool_success,
             }
             for step in executor.steps
         ],
