@@ -87,3 +87,61 @@ Each task runs in an isolated temporary workspace. Source files are writable,
 tests are evaluator-owned, and the final suite is always run independently.
 Outputs are evaluation/result.json (full traces and metrics) and
 evaluation/REPORT.md (tables, findings, limitations, and next experiments).
+
+
+## Version 2: SWE-bench Lite task data
+
+Download SWE-bench Lite and create a deterministic 50-task Agent subset:
+
+    HF_ENDPOINT=https://hf-mirror.com python scripts/load_swebench.py --num-tasks 50
+
+All raw data, Hugging Face caches, task JSON files, and future repository
+checkouts are kept under `/data_local/lyq/data_coding_agent`. No repository is
+cloned by this loader and no SWE-bench data is written into the Git project.
+
+
+## Version 2: prepare SWE-bench repositories
+
+Prepare repositories at the exact task base commits:
+
+    python scripts/prepare_repo.py --num-tasks 10
+
+The manager keeps one partial bare mirror per GitHub repository and creates
+commit-specific detached worktrees under
+`/data_local/lyq/data_coding_agent/swebench/repos/<owner__repo>/<base_commit>`.
+It checks Git >= 2.25, free disk, data-directory permissions, task schemas,
+checkout commit identity, and discovers requirements/pyproject/setup/tox files.
+Repeated valid workspaces are skipped. Use `--instance-id ID`, `--dry-run`, or
+`--refresh-mirrors` for targeted operation. Repository dependencies are only
+discovered in this phase; installation belongs to the later environment manager.
+
+
+## Version 2: run a repository task
+
+Create a task JSON outside the repository with `task_id`, `repo_path`,
+`problem_statement`, and an exact `test_command`, then run:
+
+    python agent/main.py --backend swebench --task-file /data_local/lyq/data_coding_agent/tasks/task.json
+
+Use `--model-name` to select the base model and `--adapter-path` for an optional
+PEFT adapter. The backend builds a bounded, issue-ranked Git file index, exposes
+only read_file/write_file/the task-specific run_test command, forces final test
+validation, and atomically stores unique rollout files under
+`/data_local/lyq/data_coding_agent/trajectories/raw/`. The original calculator
+demo remains available as `python agent/main.py`.
+
+
+## Version 2: batch SWE-bench rollouts
+
+Run a resumable batch with one shared model instance:
+
+    python scripts/rollout_swebench.py --num-tasks 10
+
+Each task runs in an isolated local shared clone. Atomic completion markers are
+written as `trajectories/raw/task_xxxxx.json` with status, success/fail/error,
+token usage, step count, trajectory, patch, and test result. Existing terminal
+records are skipped. Use `--retry-errors` to archive and retry errors,
+`--start-index` to shard, `--test-command-map` for per-instance/repo commands,
+and `--dry-run` to inspect scheduling without loading the model. The fallback
+`python -m pytest -q` is only a smoke command; benchmark-quality runs should use
+a prepared command map and task-specific environments.

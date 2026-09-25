@@ -6,3 +6,4 @@ accelerate>=0.34
 peft>=0.13
 datasets>=3.0
 
+# System requirement for SWE-bench repository preparation: git >= 2.25
