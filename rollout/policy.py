@@ -1,14 +1,19 @@
 """Model policy that maps repository state and observations to structured tools."""
 from __future__ import annotations
 
-import json
 import re
 import subprocess
 from pathlib import Path
+from typing import Any, Mapping, Sequence
 
 from agent.executor import Step
+from agent.planner import ALLOWED_TOOLS, Phase
+from agent.prompting import build_agent_messages
 from agent.task import Task
-from agent.tools.schema import render_tool_schemas
+from agent.tools.schema import TOOL_SCHEMAS
+
+DEFAULT_HF_CACHE = Path("/data_local/lyq/data_coding_agent/hf_cache/hub")
+
 
 class HFBackend:
     """One reusable Hugging Face model backend for one or many rollouts."""
@@ -17,23 +22,48 @@ class HFBackend:
         self,
         model_name: str = "Qwen/Qwen2.5-Coder-1.5B-Instruct",
         adapter_path: Path | None = None,
+        cache_dir: Path = DEFAULT_HF_CACHE,
+        local_files_only: bool = True,
     ) -> None:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
+
         self.torch = torch
-        tokenizer_source = str(adapter_path) if adapter_path else model_name
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_source)
+        tokenizer_source = model_name
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_source,
+            cache_dir=str(cache_dir),
+            local_files_only=local_files_only,
+            trust_remote_code=False,
+        )
         self.model = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype="auto", device_map="auto"
+            model_name,
+            cache_dir=str(cache_dir),
+            local_files_only=local_files_only,
+            trust_remote_code=False,
+            torch_dtype="auto",
+            device_map="auto",
         )
         if adapter_path:
             from peft import PeftModel
-            self.model = PeftModel.from_pretrained(self.model, str(adapter_path))
+
+            self.model = PeftModel.from_pretrained(
+                self.model,
+                str(adapter_path),
+                local_files_only=local_files_only,
+            )
         self.model.eval()
 
-    def generate(self, prompt: str, max_new_tokens: int = 768) -> tuple[str, int, int]:
+    def generate(
+        self,
+        messages: str | Sequence[Mapping[str, str]],
+        max_new_tokens: int = 1024,
+    ) -> tuple[str, int, int]:
+        """Render the shared chat state and generate one structured tool call."""
+        if isinstance(messages, str):
+            messages = [{"role": "user", "content": messages}]
         text = self.tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompt}],
+            list(messages),
             tokenize=False,
             add_generation_prompt=True,
         )
@@ -49,6 +79,7 @@ class HFBackend:
         answer = self.tokenizer.decode(generated, skip_special_tokens=True).strip()
         return answer, int(inputs.input_ids.shape[1]), int(generated.numel())
 
+
 class ReActPolicy:
     """Qwen-compatible repository policy with a strict JSON tool protocol."""
 
@@ -59,91 +90,69 @@ class ReActPolicy:
         adapter_path: Path | None = None,
         max_index_files: int = 400,
         backend: HFBackend | None = None,
+        max_action_tokens: int = 1024,
     ) -> None:
+        if max_action_tokens <= 0:
+            raise ValueError("max_action_tokens must be positive")
         self.task = task
+        self.max_action_tokens = max_action_tokens
         self.backend = backend or HFBackend(model_name, adapter_path)
         self.repository_index = build_repository_index(
             task.repo_path, task.problem_statement, max_index_files
         )
+        self.last_generation: dict[str, int | bool] | None = None
         self.prompt_tokens = 0
         self.completion_tokens = 0
 
     def next_action(self, steps: list[Step]) -> str | None:
         if steps and steps[-1].action == "run_test" and steps[-1].success:
             return None
-        current_phase = steps[-1].phase if steps and steps[-1].phase else "LOCATE"
-        phase_tools = {
-            "LOCATE": ["list_files", "search_code"],
-            "UNDERSTAND": ["read_file", "search_code"],
-            "MODIFY": ["apply_patch"],
-            "VERIFY": ["run_test"],
-        }
-        allowed_tools = phase_tools.get(current_phase, phase_tools["LOCATE"])
-        history = []
+        return self._generate(self.build_messages(steps))
+
+    def build_messages(self, steps: list[Step]) -> list[dict[str, str]]:
+        """Expose the exact shared inference state used by SFT v2."""
+        current_phase = (
+            steps[-1].phase if steps and steps[-1].phase else Phase.LOCATE.value
+        )
+        try:
+            phase = Phase(current_phase)
+        except ValueError:
+            phase = Phase.LOCATE
+            current_phase = phase.value
+        history: list[dict[str, Any]] = []
         for step in steps:
-            observation = step.observation
-            if len(observation) > 12_000:
-                observation = observation[:12_000] + "\n...[truncated in prompt]"
-            metadata = ""
-            if step.repair_applied:
-                metadata = (
-                    f"\nRepair: {step.original_action} -> {step.repaired_action}"
-                )
-            transition = (
-                f"Phase: {step.previous_phase or 'UNKNOWN'} -> "
-                f"{step.phase or 'UNKNOWN'}\n"
-            )
-            proposal = step.model_proposed_tool or step.original_action or step.action
-            execution = step.executed_tool or "(not executed)"
             history.append(
-                transition
-                + f"Model proposed: {proposal}\n"
-                + f"Executed tool: {execution}\n"
-                + "Arguments: "
-                + json.dumps(step.action_input, ensure_ascii=False)
-                + metadata
-                + f"\nObservation: {observation}"
+                {
+                    "phase": step.phase,
+                    "previous_phase": step.previous_phase,
+                    "tool": step.executed_tool or step.action,
+                    "arguments": step.action_input,
+                    "observation": step.observation,
+                    "tool_success": step.tool_success,
+                    "model_proposed_tool": step.model_proposed_tool,
+                    "executed_tool": step.executed_tool,
+                    "intervention_reason": step.intervention_reason,
+                }
             )
-        prompt = f"""You are a repository-level coding agent.
+        return build_agent_messages(
+            self.task.problem_statement,
+            current_phase,
+            sorted(ALLOWED_TOOLS[phase]),
+            TOOL_SCHEMAS,
+            history,
+            repository_index=self.repository_index,
+            test_command=self.task.test_command,
+        )
 
-Problem statement:
-{self.task.problem_statement}
-
-Ranked repository file index:
-{self.repository_index}
-
-Current planning phase: {current_phase}
-Allowed tools in this phase: {", ".join(allowed_tools)}
-
-Available tools (JSON Schema):
-{render_tool_schemas()}
-
-Return exactly one JSON object and no markdown, prose, Thought, or code fence:
-{{"tool":"<one registered tool name>","arguments":{{}}}}
-
-Rules:
-- Call only a tool allowed in the current planning phase.
-- Use only list_files, search_code, read_file, apply_patch, or run_test.
-- After three consecutive search_code calls, call read_file on a concrete candidate.
-- A successful apply_patch automatically advances to VERIFY.
-- If run_test fails, inspect the failure in UNDERSTAND before modifying again.
-- Never invent aliases such as edit_file, update_file, modify_file, or write_file.
-- Paths are relative to the repository root.
-- Read relevant source before editing it.
-- apply_patch requires a unified diff with --- a/path and +++ b/path headers.
-- Make the smallest relevant source-code change and never modify tests.
-- run_test must use exactly: {self.task.test_command}
-- Use observations from completed calls; never invent tool results.
-"""
-        if history:
-            prompt += "\nCompleted calls:\n" + "\n\n".join(history)
-        prompt += "\n\nReturn the next JSON tool call only."
-        return self._generate(prompt)
-
-    def _generate(self, prompt: str) -> str:
-        answer, prompt_tokens, completion_tokens = self.backend.generate(prompt)
+    def _generate(self, messages: Sequence[Mapping[str, str]]) -> str:
+        answer, prompt_tokens, completion_tokens = self.backend.generate(messages, max_new_tokens=self.max_action_tokens)
         self.prompt_tokens += prompt_tokens
         self.completion_tokens += completion_tokens
+        self.last_generation = {
+            "prompt_tokens": prompt_tokens,
+            "generated_tokens": completion_tokens,
+            "generation_truncated": completion_tokens >= self.max_action_tokens,
+        }
         return answer
 
     def usage(self) -> dict[str, int]:
@@ -152,6 +161,7 @@ Rules:
             "completion_tokens": self.completion_tokens,
             "total_tokens": self.prompt_tokens + self.completion_tokens,
         }
+
 
 def build_repository_index(
     repo_path: Path, problem_statement: str, max_files: int = 400

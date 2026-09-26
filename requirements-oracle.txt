@@ -1,0 +1,3 @@
+# Dependencies for SWE-bench dev oracle trajectory construction.
+-r requirements.txt
+unidiff>=0.7.5

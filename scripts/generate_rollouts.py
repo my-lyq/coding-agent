@@ -44,10 +44,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adapter-path", type=Path)
     parser.add_argument("--test-command")
     parser.add_argument("--max-steps", type=int, default=8)
+    parser.add_argument("--max-action-tokens", type=int, default=1024)
     parser.add_argument("--test-timeout", type=int, default=900)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--keep-workspace", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--heldout", action="store_true")
     return parser.parse_args()
 
 def require_data_path(path: Path, label: str) -> Path:
@@ -107,6 +109,12 @@ def derive_test_command(raw: dict[str, Any] | None, base_repo: Path) -> str:
             files.append(candidate)
     if files:
         return "python -m pytest -q " + " ".join(shlex.quote(path) for path in files)
+    return "python -m pytest -q"
+
+def derive_metadata_free_test_command(task: dict[str, Any]) -> str:
+    """Choose a repository-level command without gold/test evaluation metadata."""
+    if task.get("repo") == "django/django":
+        return "python tests/runtests.py --verbosity 1"
     return "python -m pytest -q"
 
 def repo_slug(repo: str) -> str:
@@ -180,6 +188,9 @@ def save_infrastructure_error(
             "output": f"{type(exc).__name__}: {exc}",
         },
         success=False,
+        rollout_test_passed=False,
+        benchmark_resolved=None,
+        token_usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     )
     recorder.save(record, overwrite=overwrite)
 
@@ -201,8 +212,10 @@ def main() -> int:
     output_dir = require_data_path(args.output_dir, "--output-dir")
     workspaces_dir = require_data_path(args.workspaces_dir, "--workspaces-dir")
     selected = select_tasks(args, subset_dir)
-    raw_records = json.loads(raw_file.read_text(encoding="utf-8"))
-    raw_index = {str(item.get("instance_id")): item for item in raw_records}
+    raw_index: dict[str, dict[str, Any]] = {}
+    if not args.heldout:
+        raw_records = json.loads(raw_file.read_text(encoding="utf-8"))
+        raw_index = {str(item.get("instance_id")): item for item in raw_records}
     backend: HFBackend | None = None
     counts = {"success": 0, "fail": 0, "error": 0, "skipped": 0, "dry_run": 0}
     last_code = 0
@@ -211,7 +224,11 @@ def main() -> int:
         instance_id = str(raw["instance_id"])
         base_repo = repos_dir / repo_slug(str(raw["repo"])) / str(raw["base_commit"])
         raw_task = raw_index.get(instance_id)
-        test_command = args.test_command or derive_test_command(raw_task, base_repo)
+        test_command = args.test_command or (
+            derive_metadata_free_test_command(raw)
+            if args.heldout
+            else derive_test_command(raw_task, base_repo)
+        )
         output_path = output_dir / task_file.name
         workspace = workspaces_dir / task_file.stem
         lock_path = output_dir / ".locks" / f"{task_file.stem}.lock"
@@ -248,7 +265,8 @@ def main() -> int:
                 if backend is None:
                     backend = HFBackend(args.model_name, args.adapter_path)
                 policy = ReActPolicy(
-                    task, args.model_name, args.adapter_path, backend=backend
+                    task, args.model_name, args.adapter_path, backend=backend,
+                    max_action_tokens=args.max_action_tokens,
                 )
                 runner = AgentRolloutRunner(
                     task, policy, recorder,

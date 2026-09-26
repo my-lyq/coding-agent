@@ -45,6 +45,18 @@ class AgentRolloutRunner:
         self.planner = PlanningController()
         self.policy_error: str | None = None
 
+    def _attach_generation_metadata(self, step: Step) -> None:
+        generation = getattr(self.policy, "last_generation", None)
+        if not isinstance(generation, dict):
+            return
+        prompt_tokens = generation.get("prompt_tokens")
+        generated_tokens = generation.get("generated_tokens")
+        step.prompt_tokens = int(prompt_tokens) if isinstance(prompt_tokens, int) else None
+        step.generated_tokens = (
+            int(generated_tokens) if isinstance(generated_tokens, int) else None
+        )
+        step.generation_truncated = generation.get("generation_truncated") is True
+
     def _blocked_step(
         self, request: ActionRequest, observation: str, reason: str
     ) -> Step:
@@ -141,6 +153,7 @@ class AgentRolloutRunner:
                     tool_success=False,
                 )
                 self.executor.steps.append(step)
+            self._attach_generation_metadata(step)
             if step.executed_tool == "run_test" and step.success:
                 break
 
@@ -182,6 +195,12 @@ class AgentRolloutRunner:
         }
         if self.policy_error:
             test_result["policy_error"] = self.policy_error
+        usage_fn = getattr(self.policy, "usage", None)
+        token_usage = (
+            usage_fn()
+            if callable(usage_fn)
+            else {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        )
         record = self.recorder.build_record(
             instance_id=self.task.task_id,
             problem_statement=self.task.problem_statement,
@@ -190,6 +209,9 @@ class AgentRolloutRunner:
             patch=patch,
             test_result=test_result,
             success=success,
+            rollout_test_passed=passed,
+            benchmark_resolved=None,
+            token_usage=token_usage,
         )
         output_path = self.recorder.save(record, overwrite=overwrite)
         return RolloutResult(

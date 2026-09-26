@@ -16,6 +16,10 @@ class TrajectoryRecorder:
         "patch",
         "test_result",
         "success",
+        "rollout_test_passed",
+        "host_test_result",
+        "benchmark_resolved",
+        "token_usage",
     }
 
     def __init__(self, output_path: Path) -> None:
@@ -31,6 +35,9 @@ class TrajectoryRecorder:
         patch: str,
         test_result: dict[str, Any],
         success: bool,
+        rollout_test_passed: bool | None = None,
+        benchmark_resolved: bool | None = None,
+        token_usage: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         record = {
             "instance_id": instance_id,
@@ -54,12 +61,25 @@ class TrajectoryRecorder:
                     "controller_intervened": step.controller_intervened,
                     "intervention_reason": step.intervention_reason,
                     "tool_success": step.tool_success,
+                    "prompt_tokens": step.prompt_tokens,
+                    "generated_tokens": step.generated_tokens,
+                    "generation_truncated": step.generation_truncated,
                 }
                 for step in steps
             ],
             "modified_files": sorted(modified_files),
             "patch": patch,
             "test_result": test_result,
+            "host_test_result": test_result,
+            "rollout_test_passed": (
+                success if rollout_test_passed is None else rollout_test_passed
+            ),
+            "benchmark_resolved": benchmark_resolved,
+            "token_usage": token_usage or {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            },
             "success": success,
         }
         TrajectoryRecorder.validate(record)
@@ -79,7 +99,8 @@ class TrajectoryRecorder:
             "repaired_action", "invalid_action", "repair_applied",
             "phase", "previous_phase", "model_proposed_tool",
             "executed_tool", "controller_intervened",
-            "intervention_reason", "tool_success",
+            "intervention_reason", "tool_success", "prompt_tokens",
+            "generated_tokens", "generation_truncated",
         }
         if any(set(step) != expected_step for step in record["steps"]):
             raise ValueError("trajectory step fields do not match structured schema")
@@ -87,6 +108,12 @@ class TrajectoryRecorder:
             raise ValueError("modified_files must be a list")
         if not isinstance(record["success"], bool):
             raise ValueError("success must be boolean")
+        if not isinstance(record["rollout_test_passed"], bool):
+            raise ValueError("rollout_test_passed must be boolean")
+        if record["benchmark_resolved"] is not None:
+            raise ValueError("benchmark_resolved must remain null without official evaluation")
+        if not isinstance(record["token_usage"], dict):
+            raise ValueError("token_usage must be an object")
 
     def save(self, record: dict[str, Any], overwrite: bool = False) -> Path:
         self.validate(record)

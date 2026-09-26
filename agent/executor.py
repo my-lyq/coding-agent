@@ -33,6 +33,9 @@ class Step:
     controller_intervened: bool = False
     intervention_reason: str | None = None
     tool_success: bool | None = None
+    prompt_tokens: int | None = None
+    generated_tokens: int | None = None
+    generation_truncated: bool = False
 
 @dataclass(frozen=True)
 class ActionRequest:
